@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
@@ -25,6 +26,7 @@ func main() {
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		token := extractBearerToken(r)
 		if token == "" {
+			log.Printf("Unauthorized request: missing Bearer token from %s", r.RemoteAddr)
 			return nil
 		}
 
@@ -38,6 +40,7 @@ func main() {
 			&mcp.Implementation{Name: "agentic-layer/mcp-server-gtasks", Version: "0.1.0"},
 			nil,
 		)
+		server.AddReceivingMiddleware(loggingMiddleware)
 		registerTools(server, svc)
 		registerResources(server, svc)
 		return server
@@ -54,9 +57,76 @@ func main() {
 
 	log.Printf("MCP server listening on :%s", port)
 	log.Printf("  MCP endpoint: http://localhost:%s/mcp", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, accessLogMiddleware(mux)); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
+}
+
+// accessLogMiddleware logs each HTTP request with method, path, status, and duration.
+func accessLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lw := &loggingResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(lw, r)
+		log.Printf("HTTP %s %s %d %s %s", r.Method, r.URL.Path, lw.status, time.Since(start), r.RemoteAddr)
+	})
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *loggingResponseWriter) WriteHeader(status int) {
+	if !w.wroteHeader {
+		w.status = status
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *loggingResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *loggingResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// loggingMiddleware logs each incoming MCP method call with its duration and any error.
+// For tools/call, the tool name is included.
+func loggingMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		start := time.Now()
+		detail := mcpRequestDetail(method, req)
+		result, err := next(ctx, method, req)
+		if err != nil {
+			log.Printf("MCP %s%s failed in %s: %v", method, detail, time.Since(start), err)
+		} else {
+			log.Printf("MCP %s%s ok in %s", method, detail, time.Since(start))
+		}
+		return result, err
+	}
+}
+
+func mcpRequestDetail(method string, req mcp.Request) string {
+	if method != "tools/call" {
+		return ""
+	}
+	params, ok := req.GetParams().(*mcp.CallToolParamsRaw)
+	if !ok || params == nil {
+		return ""
+	}
+	if len(params.Arguments) == 0 {
+		return fmt.Sprintf(" tool=%s", params.Name)
+	}
+	return fmt.Sprintf(" tool=%s args=%s", params.Name, params.Arguments)
 }
 
 func newTasksService(ctx context.Context, accessToken string) (*tasks.Service, error) {
