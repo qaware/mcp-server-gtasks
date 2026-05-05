@@ -107,6 +107,51 @@ type ClearInput struct {
 	TaskListID string `json:"taskListId" jsonschema:"Task list ID"`
 }
 
+// --- Tool Outputs ---
+
+type TaskOutput struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Status    string `json:"status,omitempty"`
+	Due       string `json:"due,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	Updated   string `json:"updated,omitempty"`
+	Completed string `json:"completed,omitempty"`
+}
+
+type TaskListOutput struct {
+	ID    string       `json:"id"`
+	Title string       `json:"title"`
+	Tasks []TaskOutput `json:"tasks"`
+}
+
+type SearchOutput struct {
+	Matches []TaskOutput `json:"matches"`
+}
+
+type ListOutput struct {
+	TaskLists  []TaskListOutput `json:"taskLists"`
+	NextCursor string           `json:"nextCursor,omitempty"`
+}
+
+type CreateOutput struct {
+	Task TaskOutput `json:"task"`
+}
+
+type UpdateOutput struct {
+	Task TaskOutput `json:"task"`
+}
+
+type DeleteOutput struct {
+	ID      string `json:"id"`
+	Deleted bool   `json:"deleted"`
+}
+
+type ClearOutput struct {
+	TaskListID string `json:"taskListId"`
+	Cleared    bool   `json:"cleared"`
+}
+
 func registerTools(server *mcp.Server, svc *tasks.Service) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search",
@@ -157,15 +202,16 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 	}, clearHandler(svc))
 }
 
-func searchHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, SearchInput) (*mcp.CallToolResult, struct{}, error) {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, struct{}, error) {
+func searchHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, SearchInput) (*mcp.CallToolResult, SearchOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input SearchInput) (*mcp.CallToolResult, SearchOutput, error) {
 		query := strings.ToLower(input.Query)
 		taskLists, err := svc.Tasklists.List().Context(ctx).Do()
 		if err != nil {
-			return nil, struct{}{}, fmt.Errorf("list task lists: %w", err)
+			return nil, SearchOutput{}, fmt.Errorf("list task lists: %w", err)
 		}
 
-		var matches []string
+		out := SearchOutput{Matches: []TaskOutput{}}
+		var lines []string
 		for _, tl := range taskLists.Items {
 			tasksResp, err := svc.Tasks.List(tl.Id).Context(ctx).Do()
 			if err != nil {
@@ -174,26 +220,28 @@ func searchHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolReques
 			for _, t := range tasksResp.Items {
 				if strings.Contains(strings.ToLower(t.Title), query) ||
 					strings.Contains(strings.ToLower(t.Notes), query) {
-					matches = append(matches, formatTask(t))
+					out.Matches = append(out.Matches, toTaskOutput(t))
+					lines = append(lines, formatTask(t))
 				}
 			}
 		}
 
 		text := "No tasks found matching your search."
-		if len(matches) > 0 {
-			text = strings.Join(matches, "\n\n")
+		if len(lines) > 0 {
+			text = strings.Join(lines, "\n\n")
 		}
-		return textResult(text), struct{}{}, nil
+		return textResult(text), out, nil
 	}
 }
 
-func listHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, ListInput) (*mcp.CallToolResult, struct{}, error) {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, struct{}, error) {
+func listHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, ListInput) (*mcp.CallToolResult, ListOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input ListInput) (*mcp.CallToolResult, ListOutput, error) {
 		taskLists, err := svc.Tasklists.List().Context(ctx).Do()
 		if err != nil {
-			return nil, struct{}{}, fmt.Errorf("list task lists: %w", err)
+			return nil, ListOutput{}, fmt.Errorf("list task lists: %w", err)
 		}
 
+		out := ListOutput{TaskLists: []TaskListOutput{}}
 		var lines []string
 		for _, tl := range taskLists.Items {
 			call := svc.Tasks.List(tl.Id).Context(ctx)
@@ -204,11 +252,20 @@ func listHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest,
 			if err != nil {
 				continue
 			}
-			if len(tasksResp.Items) > 0 {
-				lines = append(lines, fmt.Sprintf("== Task List: %s ==", tl.Title))
-				for _, t := range tasksResp.Items {
-					lines = append(lines, formatTask(t))
-				}
+			if len(tasksResp.Items) == 0 {
+				continue
+			}
+
+			tlOut := TaskListOutput{ID: tl.Id, Title: tl.Title, Tasks: []TaskOutput{}}
+			lines = append(lines, fmt.Sprintf("== Task List: %s ==", tl.Title))
+			for _, t := range tasksResp.Items {
+				tlOut.Tasks = append(tlOut.Tasks, toTaskOutput(t))
+				lines = append(lines, formatTask(t))
+			}
+			out.TaskLists = append(out.TaskLists, tlOut)
+
+			if tasksResp.NextPageToken != "" && out.NextCursor == "" {
+				out.NextCursor = tasksResp.NextPageToken
 			}
 		}
 
@@ -216,12 +273,12 @@ func listHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest,
 		if len(lines) > 0 {
 			text = strings.Join(lines, "\n\n")
 		}
-		return textResult(text), struct{}{}, nil
+		return textResult(text), out, nil
 	}
 }
 
-func createHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, CreateInput) (*mcp.CallToolResult, struct{}, error) {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input CreateInput) (*mcp.CallToolResult, struct{}, error) {
+func createHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, CreateInput) (*mcp.CallToolResult, CreateOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input CreateInput) (*mcp.CallToolResult, CreateOutput, error) {
 		taskListID := input.TaskListID
 		if taskListID == "" {
 			taskListID = "@default"
@@ -235,14 +292,14 @@ func createHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolReques
 
 		created, err := svc.Tasks.Insert(taskListID, task).Context(ctx).Do()
 		if err != nil {
-			return nil, struct{}{}, fmt.Errorf("create task: %w", err)
+			return nil, CreateOutput{}, fmt.Errorf("create task: %w", err)
 		}
-		return textResult("Task created:\n" + formatTask(created)), struct{}{}, nil
+		return textResult("Task created:\n" + formatTask(created)), CreateOutput{Task: toTaskOutput(created)}, nil
 	}
 }
 
-func updateHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, UpdateInput) (*mcp.CallToolResult, struct{}, error) {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, struct{}, error) {
+func updateHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, UpdateInput) (*mcp.CallToolResult, UpdateOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input UpdateInput) (*mcp.CallToolResult, UpdateOutput, error) {
 		taskListID := input.TaskListID
 		if taskListID == "" {
 			taskListID = "@default"
@@ -264,29 +321,29 @@ func updateHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolReques
 
 		updated, err := svc.Tasks.Patch(taskListID, input.ID, task).Context(ctx).Do()
 		if err != nil {
-			return nil, struct{}{}, fmt.Errorf("update task: %w", err)
+			return nil, UpdateOutput{}, fmt.Errorf("update task: %w", err)
 		}
-		return textResult("Task updated:\n" + formatTask(updated)), struct{}{}, nil
+		return textResult("Task updated:\n" + formatTask(updated)), UpdateOutput{Task: toTaskOutput(updated)}, nil
 	}
 }
 
-func deleteHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, DeleteInput) (*mcp.CallToolResult, struct{}, error) {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, struct{}, error) {
+func deleteHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, DeleteInput) (*mcp.CallToolResult, DeleteOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input DeleteInput) (*mcp.CallToolResult, DeleteOutput, error) {
 		err := svc.Tasks.Delete(input.TaskListID, input.ID).Context(ctx).Do()
 		if err != nil {
-			return nil, struct{}{}, fmt.Errorf("delete task: %w", err)
+			return nil, DeleteOutput{}, fmt.Errorf("delete task: %w", err)
 		}
-		return textResult(fmt.Sprintf("Task %s deleted.", input.ID)), struct{}{}, nil
+		return textResult(fmt.Sprintf("Task %s deleted.", input.ID)), DeleteOutput{ID: input.ID, Deleted: true}, nil
 	}
 }
 
-func clearHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, ClearInput) (*mcp.CallToolResult, struct{}, error) {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input ClearInput) (*mcp.CallToolResult, struct{}, error) {
+func clearHandler(svc *tasks.Service) func(context.Context, *mcp.CallToolRequest, ClearInput) (*mcp.CallToolResult, ClearOutput, error) {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input ClearInput) (*mcp.CallToolResult, ClearOutput, error) {
 		err := svc.Tasks.Clear(input.TaskListID).Context(ctx).Do()
 		if err != nil {
-			return nil, struct{}{}, fmt.Errorf("clear tasks: %w", err)
+			return nil, ClearOutput{}, fmt.Errorf("clear tasks: %w", err)
 		}
-		return textResult(fmt.Sprintf("Completed tasks cleared from list %s.", input.TaskListID)), struct{}{}, nil
+		return textResult(fmt.Sprintf("Completed tasks cleared from list %s.", input.TaskListID)), ClearOutput{TaskListID: input.TaskListID, Cleared: true}, nil
 	}
 }
 
@@ -338,6 +395,21 @@ func textResult(text string) *mcp.CallToolResult {
 			&mcp.TextContent{Text: text},
 		},
 	}
+}
+
+func toTaskOutput(t *tasks.Task) TaskOutput {
+	out := TaskOutput{
+		ID:      t.Id,
+		Title:   t.Title,
+		Status:  t.Status,
+		Due:     t.Due,
+		Notes:   t.Notes,
+		Updated: t.Updated,
+	}
+	if t.Completed != nil {
+		out.Completed = *t.Completed
+	}
+	return out
 }
 
 func formatTask(t *tasks.Task) string {
