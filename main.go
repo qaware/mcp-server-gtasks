@@ -111,31 +111,49 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "search",
 		Description: "Search for a task in Google Tasks",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint: true,
+		},
 	}, searchHandler(svc))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list",
 		Description: "List all tasks in Google Tasks",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint: true,
+		},
 	}, listHandler(svc))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "create",
 		Description: "Create a new task in Google Tasks",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: new(false),
+		},
 	}, createHandler(svc))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "update",
 		Description: "Update a task in Google Tasks",
+		Annotations: &mcp.ToolAnnotations{
+			IdempotentHint: true,
+		},
 	}, updateHandler(svc))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delete",
 		Description: "Delete a task in Google Tasks",
+		Annotations: &mcp.ToolAnnotations{
+			IdempotentHint: true,
+		},
 	}, deleteHandler(svc))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "clear",
 		Description: "Clear completed tasks from a Google Tasks task list",
+		Annotations: &mcp.ToolAnnotations{
+			IdempotentHint: true,
+		},
 	}, clearHandler(svc))
 }
 
