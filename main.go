@@ -2,239 +2,33 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 	"google.golang.org/api/tasks/v1"
 )
 
-// pendingAuth holds state for an in-progress OAuth authorization.
-type pendingAuth struct {
-	ClientID      string
-	RedirectURI   string
-	State         string
-	CodeChallenge string
-	GoogleTokens  *oauth2.Token // set after Google callback
-	AuthCode      string        // our issued auth code
-	ExpiresAt     time.Time
-}
-
-// tokenEntry maps an issued access token to Google credentials.
-type tokenEntry struct {
-	GoogleRefreshToken string
-	ClientID           string
-	ExpiresAt          time.Time
-}
-
-// registeredClient holds dynamic client registration info.
-type registeredClient struct {
-	ClientID     string   `json:"client_id"`
-	ClientSecret string   `json:"client_secret,omitempty"`
-	RedirectURIs []string `json:"redirect_uris"`
-	Name         string   `json:"client_name,omitempty"`
-}
-
-var (
-	// In-memory stores (reference implementation only).
-	pendingAuths      = map[string]*pendingAuth{}      // keyed by state
-	authCodes         = map[string]*pendingAuth{}      // keyed by auth code
-	accessTokens      = map[string]*tokenEntry{}       // keyed by access token
-	registeredClients = map[string]*registeredClient{} // keyed by client_id
-	mu                sync.Mutex
-)
-
 func main() {
-	clientID := os.Getenv("GOOGLE_CLIENT_ID")
-	clientSecret := os.Getenv("GOOGLE_CLIENT_SECRET")
-	if clientID == "" || clientSecret == "" {
-		log.Fatal("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables are required")
-	}
-
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	baseURL := os.Getenv("BASE_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:" + port
-	}
-
-	googleOAuth := &oauth2.Config{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		Endpoint:     google.Endpoint,
-		RedirectURL:  baseURL + "/google/callback",
-		Scopes:       []string{tasks.TasksScope},
-	}
-
 	mux := http.NewServeMux()
 
-	// RFC 8414: OAuth 2.0 Authorization Server Metadata.
-	mux.HandleFunc("GET /.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                                baseURL,
-			"authorization_endpoint":                baseURL + "/authorize",
-			"token_endpoint":                        baseURL + "/token",
-			"registration_endpoint":                 baseURL + "/register",
-			"response_types_supported":              []string{"code"},
-			"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-			"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
-			"code_challenge_methods_supported":      []string{"S256"},
-			"scopes_supported":                      []string{tasks.TasksScope},
-		})
-	})
-
-	// RFC 7591: Dynamic Client Registration.
-	mux.HandleFunc("POST /register", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			RedirectURIs []string `json:"redirect_uris"`
-			ClientName   string   `json:"client_name"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			jsonError(w, "invalid_request", "Invalid JSON body", http.StatusBadRequest)
-			return
-		}
-
-		id, _ := randomHex(16)
-		client := &registeredClient{
-			ClientID:     id,
-			RedirectURIs: req.RedirectURIs,
-			Name:         req.ClientName,
-		}
-
-		mu.Lock()
-		registeredClients[id] = client
-		mu.Unlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(client)
-	})
-
-	// OAuth 2.1 Authorization Endpoint.
-	mux.HandleFunc("GET /authorize", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		cID := q.Get("client_id")
-		redirectURI := q.Get("redirect_uri")
-		state := q.Get("state")
-		codeChallenge := q.Get("code_challenge")
-		codeChallengeMethod := q.Get("code_challenge_method")
-
-		if cID == "" || redirectURI == "" || codeChallenge == "" {
-			jsonError(w, "invalid_request", "Missing required parameters: client_id, redirect_uri, code_challenge", http.StatusBadRequest)
-			return
-		}
-		if codeChallengeMethod != "" && codeChallengeMethod != "S256" {
-			jsonError(w, "invalid_request", "Only S256 code_challenge_method is supported", http.StatusBadRequest)
-			return
-		}
-
-		// Generate internal state for the Google OAuth leg.
-		googleState, _ := randomHex(16)
-
-		mu.Lock()
-		pendingAuths[googleState] = &pendingAuth{
-			ClientID:      cID,
-			RedirectURI:   redirectURI,
-			State:         state,
-			CodeChallenge: codeChallenge,
-			ExpiresAt:     time.Now().Add(10 * time.Minute),
-		}
-		mu.Unlock()
-
-		// Redirect to Google consent screen.
-		url := googleOAuth.AuthCodeURL(googleState, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
-		http.Redirect(w, r, url, http.StatusFound)
-	})
-
-	// Google OAuth callback: exchanges Google code, issues our auth code, redirects back to MCP client.
-	mux.HandleFunc("GET /google/callback", func(w http.ResponseWriter, r *http.Request) {
-		googleState := r.URL.Query().Get("state")
-		code := r.URL.Query().Get("code")
-
-		mu.Lock()
-		pending, ok := pendingAuths[googleState]
-		if ok {
-			delete(pendingAuths, googleState)
-		}
-		mu.Unlock()
-
-		if !ok || time.Now().After(pending.ExpiresAt) {
-			http.Error(w, "Invalid or expired state", http.StatusBadRequest)
-			return
-		}
-
-		// Exchange Google auth code for tokens.
-		token, err := googleOAuth.Exchange(r.Context(), code)
-		if err != nil {
-			http.Error(w, "Google token exchange failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Generate our authorization code.
-		authCode, _ := randomHex(32)
-		pending.GoogleTokens = token
-		pending.AuthCode = authCode
-
-		mu.Lock()
-		authCodes[authCode] = pending
-		mu.Unlock()
-
-		// Redirect back to MCP client's redirect_uri with our auth code.
-		redirectURL := pending.RedirectURI + "?code=" + authCode
-		if pending.State != "" {
-			redirectURL += "&state=" + pending.State
-		}
-		http.Redirect(w, r, redirectURL, http.StatusFound)
-	})
-
-	// OAuth 2.1 Token Endpoint.
-	mux.HandleFunc("POST /token", func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			jsonError(w, "invalid_request", "Invalid form body", http.StatusBadRequest)
-			return
-		}
-
-		grantType := r.FormValue("grant_type")
-		switch grantType {
-		case "authorization_code":
-			handleAuthCodeGrant(w, r, googleOAuth)
-		case "refresh_token":
-			handleRefreshTokenGrant(w, r, googleOAuth)
-		default:
-			jsonError(w, "unsupported_grant_type", "Supported: authorization_code, refresh_token", http.StatusBadRequest)
-		}
-	})
-
-	// MCP streamable HTTP endpoint.
 	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		token := extractBearerToken(r)
-
-		mu.Lock()
-		entry, ok := accessTokens[token]
-		mu.Unlock()
-
-		if !ok || time.Now().After(entry.ExpiresAt) {
+		if token == "" {
 			return nil
 		}
 
-		svc, err := newTasksService(r.Context(), googleOAuth, entry.GoogleRefreshToken)
+		svc, err := newTasksService(r.Context(), token)
 		if err != nil {
 			log.Printf("Failed to create Tasks service: %v", err)
 			return nil
@@ -249,153 +43,24 @@ func main() {
 		return server
 	}, nil)
 
-	// Wrap MCP handler: return 401 if no valid bearer token.
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		token := extractBearerToken(r)
-		if token == "" {
-			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, baseURL))
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		mu.Lock()
-		entry, ok := accessTokens[token]
-		mu.Unlock()
-
-		if !ok || time.Now().After(entry.ExpiresAt) {
+		if extractBearerToken(r) == "" {
 			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			http.Error(w, "Unauthorized: missing Bearer token", http.StatusUnauthorized)
 			return
 		}
-
 		mcpHandler.ServeHTTP(w, r)
 	})
 
-	// RFC 9728: OAuth 2.0 Protected Resource Metadata.
-	mux.HandleFunc("GET /.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"resource":              baseURL + "/mcp",
-			"authorization_servers": []string{baseURL},
-			"scopes_supported":      []string{tasks.TasksScope},
-		})
-	})
-
 	log.Printf("MCP server listening on :%s", port)
-	log.Printf("  MCP endpoint:     %s/mcp", baseURL)
-	log.Printf("  Auth metadata:    %s/.well-known/oauth-authorization-server", baseURL)
-	log.Printf("  Resource metadata:%s/.well-known/oauth-protected-resource", baseURL)
+	log.Printf("  MCP endpoint: http://localhost:%s/mcp", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("Server error: %v", err)
 	}
 }
 
-// handleAuthCodeGrant exchanges an authorization code for access + refresh tokens.
-func handleAuthCodeGrant(w http.ResponseWriter, r *http.Request, _ *oauth2.Config) {
-	code := r.FormValue("code")
-	codeVerifier := r.FormValue("code_verifier")
-
-	mu.Lock()
-	pending, ok := authCodes[code]
-	if ok {
-		delete(authCodes, code)
-	}
-	mu.Unlock()
-
-	if !ok {
-		jsonError(w, "invalid_grant", "Invalid or expired authorization code", http.StatusBadRequest)
-		return
-	}
-
-	// Validate PKCE: S256 verification.
-	if !verifyPKCE(pending.CodeChallenge, codeVerifier) {
-		jsonError(w, "invalid_grant", "PKCE verification failed", http.StatusBadRequest)
-		return
-	}
-
-	// Issue our access token and refresh token.
-	accessToken, _ := randomHex(32)
-	refreshToken, _ := randomHex(32)
-	expiresIn := 3600
-
-	mu.Lock()
-	accessTokens[accessToken] = &tokenEntry{
-		GoogleRefreshToken: pending.GoogleTokens.RefreshToken,
-		ClientID:           pending.ClientID,
-		ExpiresAt:          time.Now().Add(time.Duration(expiresIn) * time.Second),
-	}
-	// Store refresh token mapping (reuse accessTokens map with long expiry).
-	accessTokens[refreshToken] = &tokenEntry{
-		GoogleRefreshToken: pending.GoogleTokens.RefreshToken,
-		ClientID:           pending.ClientID,
-		ExpiresAt:          time.Now().Add(90 * 24 * time.Hour),
-	}
-	mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token":  accessToken,
-		"token_type":    "Bearer",
-		"expires_in":    expiresIn,
-		"refresh_token": refreshToken,
-	})
-}
-
-// handleRefreshTokenGrant exchanges a refresh token for a new access token.
-func handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request, _ *oauth2.Config) {
-	refreshToken := r.FormValue("refresh_token")
-
-	mu.Lock()
-	entry, ok := accessTokens[refreshToken]
-	mu.Unlock()
-
-	if !ok || time.Now().After(entry.ExpiresAt) {
-		jsonError(w, "invalid_grant", "Invalid or expired refresh token", http.StatusBadRequest)
-		return
-	}
-
-	// Issue new access token.
-	newAccessToken, _ := randomHex(32)
-	expiresIn := 3600
-
-	mu.Lock()
-	accessTokens[newAccessToken] = &tokenEntry{
-		GoogleRefreshToken: entry.GoogleRefreshToken,
-		ClientID:           entry.ClientID,
-		ExpiresAt:          time.Now().Add(time.Duration(expiresIn) * time.Second),
-	}
-	mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"access_token": newAccessToken,
-		"token_type":   "Bearer",
-		"expires_in":   expiresIn,
-	})
-}
-
-// verifyPKCE validates S256 code challenge against verifier.
-func verifyPKCE(challenge, verifier string) bool {
-	if challenge == "" || verifier == "" {
-		return false
-	}
-	h := sha256.Sum256([]byte(verifier))
-	computed := base64.RawURLEncoding.EncodeToString(h[:])
-	return computed == challenge
-}
-
-func jsonError(w http.ResponseWriter, code, description string, status int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":             code,
-		"error_description": description,
-	})
-}
-
-func newTasksService(ctx context.Context, conf *oauth2.Config, refreshToken string) (*tasks.Service, error) {
-	token := &oauth2.Token{RefreshToken: refreshToken}
-	tokenSource := conf.TokenSource(ctx, token)
+func newTasksService(ctx context.Context, accessToken string) (*tasks.Service, error) {
+	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken})
 	return tasks.NewService(ctx, option.WithTokenSource(tokenSource))
 }
 
@@ -405,14 +70,6 @@ func extractBearerToken(r *http.Request) string {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
 	return ""
-}
-
-func randomHex(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 // --- Tool Definitions ---
