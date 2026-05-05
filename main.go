@@ -75,36 +75,36 @@ func extractBearerToken(r *http.Request) string {
 // --- Tool Definitions ---
 
 type SearchInput struct {
-	Query string `json:"query" jsonschema:"description=Search query"`
+	Query string `json:"query" jsonschema:"Search query"`
 }
 
 type ListInput struct {
-	Cursor string `json:"cursor,omitempty" jsonschema:"description=Cursor for pagination"`
+	Cursor string `json:"cursor,omitempty" jsonschema:"Cursor for pagination"`
 }
 
 type CreateInput struct {
-	TaskListID string `json:"taskListId,omitempty" jsonschema:"description=Task list ID (defaults to @default)"`
-	Title      string `json:"title" jsonschema:"description=Task title"`
-	Notes      string `json:"notes,omitempty" jsonschema:"description=Task notes"`
-	Due        string `json:"due,omitempty" jsonschema:"description=Due date (RFC 3339)"`
+	TaskListID string `json:"taskListId,omitempty" jsonschema:"Task list ID (defaults to @default)"`
+	Title      string `json:"title" jsonschema:"Task title"`
+	Notes      string `json:"notes,omitempty" jsonschema:"Task notes"`
+	Due        string `json:"due,omitempty" jsonschema:"Due date (RFC 3339)"`
 }
 
 type UpdateInput struct {
-	ID         string `json:"id" jsonschema:"description=Task ID"`
-	TaskListID string `json:"taskListId,omitempty" jsonschema:"description=Task list ID (defaults to @default)"`
-	Title      string `json:"title,omitempty" jsonschema:"description=Task title"`
-	Notes      string `json:"notes,omitempty" jsonschema:"description=Task notes"`
-	Status     string `json:"status,omitempty" jsonschema:"description=Task status (needsAction or completed),enum=needsAction|completed"`
-	Due        string `json:"due,omitempty" jsonschema:"description=Due date (RFC 3339)"`
+	ID         string `json:"id" jsonschema:"Task ID"`
+	TaskListID string `json:"taskListId,omitempty" jsonschema:"Task list ID (defaults to @default)"`
+	Title      string `json:"title,omitempty" jsonschema:"Task title"`
+	Notes      string `json:"notes,omitempty" jsonschema:"Task notes"`
+	Status     string `json:"status,omitempty" jsonschema:"Task status: needsAction or completed"`
+	Due        string `json:"due,omitempty" jsonschema:"Due date (RFC 3339)"`
 }
 
 type DeleteInput struct {
-	ID         string `json:"id" jsonschema:"description=Task ID"`
-	TaskListID string `json:"taskListId" jsonschema:"description=Task list ID"`
+	ID         string `json:"id" jsonschema:"Task ID"`
+	TaskListID string `json:"taskListId" jsonschema:"Task list ID"`
 }
 
 type ClearInput struct {
-	TaskListID string `json:"taskListId" jsonschema:"description=Task list ID"`
+	TaskListID string `json:"taskListId" jsonschema:"Task list ID"`
 }
 
 func registerTools(server *mcp.Server, svc *tasks.Service) {
