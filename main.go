@@ -227,7 +227,10 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 		Name:        "search",
 		Description: "Search for a task in Google Tasks",
 		Annotations: &mcp.ToolAnnotations{
-			ReadOnlyHint: true,
+			ReadOnlyHint:    true,
+			DestructiveHint: new(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   new(false),
 		},
 	}, searchHandler(svc))
 
@@ -235,7 +238,10 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 		Name:        "list",
 		Description: "List all tasks in Google Tasks",
 		Annotations: &mcp.ToolAnnotations{
-			ReadOnlyHint: true,
+			ReadOnlyHint:    true,
+			DestructiveHint: new(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   new(false),
 		},
 	}, listHandler(svc))
 
@@ -243,7 +249,10 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 		Name:        "create",
 		Description: "Create a new task in Google Tasks",
 		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:    false,
 			DestructiveHint: new(false),
+			IdempotentHint:  false,
+			OpenWorldHint:   new(false),
 		},
 	}, createHandler(svc))
 
@@ -251,7 +260,10 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 		Name:        "update",
 		Description: "Update a task in Google Tasks",
 		Annotations: &mcp.ToolAnnotations{
-			IdempotentHint: true,
+			ReadOnlyHint:    false,
+			DestructiveHint: new(true),
+			IdempotentHint:  true,
+			OpenWorldHint:   new(false),
 		},
 	}, updateHandler(svc))
 
@@ -259,7 +271,10 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 		Name:        "delete",
 		Description: "Delete a task in Google Tasks",
 		Annotations: &mcp.ToolAnnotations{
-			IdempotentHint: true,
+			ReadOnlyHint:    false,
+			DestructiveHint: new(true),
+			IdempotentHint:  true,
+			OpenWorldHint:   new(false),
 		},
 	}, deleteHandler(svc))
 
@@ -267,7 +282,10 @@ func registerTools(server *mcp.Server, svc *tasks.Service) {
 		Name:        "clear",
 		Description: "Clear completed tasks from a Google Tasks task list",
 		Annotations: &mcp.ToolAnnotations{
-			IdempotentHint: true,
+			ReadOnlyHint:    false,
+			DestructiveHint: new(true),
+			IdempotentHint:  true,
+			OpenWorldHint:   new(false),
 		},
 	}, clearHandler(svc))
 }
